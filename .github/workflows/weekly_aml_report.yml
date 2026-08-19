@@ -4,10 +4,27 @@ on:
   schedule:
     # 매주 월요일 한국 시간(KST) 오전 9:00 (UTC 일요일 24:00 / 월요일 00:00)
     - cron: '0 0 * * 1'
-  workflow_dispatch: # 수동 실행 지원
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: '기준 날짜 (YYYY-MM-DD 형식, 예: 2026-07-27 -> 7월 3주차 보고서 생성). 비워둘 경우 직전 주차 자동 계산'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: '이메일 발송 없이 수집 및 보고서 생성만 수행 (테스트용)'
+        required: false
+        default: false
+        type: boolean
+      skip_screenshot:
+        description: '스크린샷 캡처 단계 건너뛰기 (빠른 실행용)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   run-aml-agent:
+    name: Generate & Send AML Weekly Insight Report
     runs-on: ubuntu-latest
 
     steps:
@@ -19,6 +36,10 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      - name: Set Timezone to Asia/Seoul
+        run: |
+          sudo timedatectl set-timezone Asia/Seoul
 
       - name: Install dependencies
         run: |
@@ -34,8 +55,33 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER || 'smtp.gmail.com' }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+          PYTHONIOENCODING: "utf-8"
+          TZ: "Asia/Seoul"
         run: |
-          python main.py
+          ARGS=""
+          if [ -n "${{ inputs.target_date }}" ]; then
+            ARGS="$ARGS --target-date ${{ inputs.target_date }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.skip_screenshot }}" = "true" ]; then
+            ARGS="$ARGS --skip-screenshot"
+          fi
+
+          echo "Running: python main.py $ARGS"
+          python main.py $ARGS
+
+      - name: Display Report in GitHub Action Summary
+        if: always()
+        run: |
+          LATEST_TXT=$(ls -t reports/aml_report_*.txt 2>/dev/null | head -n 1)
+          if [ -n "$LATEST_TXT" ] && [ -f "$LATEST_TXT" ]; then
+            echo "### 📄 AML & Sanctions Weekly Insight Report Preview" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            cat "$LATEST_TXT" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Upload Generated Reports and Screenshots
         if: always()
