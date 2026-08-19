@@ -20,6 +20,11 @@ def get_target_dates(base_date: datetime = None) -> List[Dict[str, any]]:
     current_week_monday = base_date - timedelta(days=weekday)
     last_week_monday = current_week_monday - timedelta(days=7)
 
+    start_d = last_week_monday
+    end_d = last_week_monday + timedelta(days=4)
+    week_range_label = f"{start_d.strftime('%Y-%m-%d')} ~ {end_d.strftime('%Y-%m-%d')}"
+    week_short_label = f"{start_d.month}월 {start_d.day}일 ~ {end_d.month}월 {end_d.day}일"
+
     target_dates = []
     for i in range(5):  # 월, 화, 수, 목, 금
         d = last_week_monday + timedelta(days=i)
@@ -29,7 +34,7 @@ def get_target_dates(base_date: datetime = None) -> List[Dict[str, any]]:
         m_str = str(d.month)
         d_str = str(d.day)
         
-        # 정확한 질문 형식: "{YY}년 {M}월 {D}일에 국내외 자금세탁방지 감독기관의 공시된 내용을 알려주세요."
+        # 질문 형식: "{YY}년 {M}월 {D}일에 국내외 자금세탁방지 감독기관의 공시된 내용을 알려주세요."
         question = f"{yy_str}년 {m_str}월 {d_str}일에 국내외 자금세탁방지 감독기관의 공시된 내용을 알려주세요."
         date_label = f"{yy_str}년 {m_str}월 {d_str}일"
         short_date_label = f"{m_str}월 {d_str}일"
@@ -43,6 +48,10 @@ def get_target_dates(base_date: datetime = None) -> List[Dict[str, any]]:
             "date_label": date_label,
             "short_date_label": short_date_label,
             "question": question,
+            "week_start": start_d,
+            "week_end": end_d,
+            "week_range": week_range_label,
+            "week_short_range": week_short_label,
         })
 
     return target_dates

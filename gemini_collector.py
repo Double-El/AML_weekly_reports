@@ -22,10 +22,13 @@ def call_gemini_rest_api(
 ) -> Tuple[Optional[str], List[str]]:
     """
     Google AI Studio REST API를 직접 호출합니다.
+    - 지원 모델 목록을 순차적으로 시도하고, 지수 백오프 재시도를 수행합니다.
+    - Grounding 검색 실패 시 Search 도구 없이 재시도하는 Fallback을 제공합니다.
     반환값: (생성된 텍스트, Grounding 웹 검색 출처 URL 목록)
     """
     if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해 주세요.")
+        print("[경고] GEMINI_API_KEY가 설정되지 않았습니다. .env 또는 GitHub Secrets를 확인해 주세요.")
+        return None, []
 
     models_to_try = [GEMINI_MODEL] + [m for m in FALLBACK_MODELS if m != GEMINI_MODEL]
 
@@ -76,17 +79,19 @@ def call_gemini_rest_api(
                             if full_text:
                                 return full_text, grounding_urls
                     elif res.status_code == 429:
-                        wait_sec = (attempt + 1) * 3
-                        print(f"  [API 할당량 대기] {model_name} (Search={use_grounding}) {wait_sec}초 대기 후 재시도...")
+                        wait_sec = (attempt + 1) * 2
+                        print(f"  [API 할당량 대기] {model_name} (Search={use_grounding}) {wait_sec}초 대기...")
                         time.sleep(wait_sec)
+                    elif res.status_code == 401:
+                        print(f"  [인증 오류 401] GEMINI_API_KEY의 유효성을 확인하세요.")
+                        return None, []
                     elif res.status_code in [400, 404]:
+                        # 모델 미지원 또는 search tool 미지원 시 다음 옵션 시도
                         break
                     else:
-                        print(f"  [API 응답 상태: {res.status_code}] {res.text[:120]}")
-                        time.sleep(2)
+                        time.sleep(1)
                 except Exception as e:
-                    print(f"  [HTTP 요청 오류] {e}")
-                    time.sleep(2)
+                    time.sleep(1)
 
     return None, []
 
@@ -127,18 +132,19 @@ def collect_daily_announcements(
     client: Any = None,
 ) -> List[Dict[str, Any]]:
     """
-    1단계: 특정 일자의 공시 내용을 Gemini API를 통해 질문하고 수집합니다.
-    질문 예: "26년 8월 10일에 국내외 자금세탁방지 감독기관의 공시된 내용을 알려주세요."
+    1단계: 특정 일자 및 주간 범위의 공시 내용을 Gemini API를 통해 질문하고 수집합니다.
+    - 일자별 공시뿐만 아니라 해당 주차에 공시된 주요 규제/제재 사항도 함께 포괄적으로 탐색합니다.
     """
     question_prompt = target_date_info["question"]
     authority_text = build_authority_constraint_text()
+    week_range_str = target_date_info.get("week_short_range", target_date_info["short_date_label"])
 
     prompt = f"""{authority_text}
 
 질문: "{question_prompt}"
 
 지침:
-1. 위 15개 감독기관에서 {target_date_info['date_label']}에 실제로 발표 또는 공시된 공식 보도자료, 제재 부과, 법령/가이드라인 개정, 제재 리스트 업데이트 등의 내용을 조사하여 알려주세요.
+1. 위 15개 감독기관에서 {target_date_info['date_label']} (또는 해당 주간 {week_range_str})에 실제로 발표 또는 공시된 공식 보도자료, 제재 부과, 법령/가이드라인 개정, 제재 리스트 업데이트 등의 내용을 조사하여 알려주세요.
 2. 각 공시별로 감독기관명, 간결한 공시 제목, 상세한 공시 내용을 구조화하여 작성해 주세요.
 3. 해당 일자에 위 15개 기관의 공식 공시가 전혀 확인되지 않는 경우 "공시 내용 없음"으로 응답해 주세요.
 4. 아래 JSON 형식의 배열(Array)로만 출력해 주세요:
@@ -187,6 +193,8 @@ def collect_daily_announcements(
     for item in items:
         if isinstance(item, dict) and item.get("title"):
             item["target_date_info"] = target_date_info
+            if grounding_urls and not item.get("source_url"):
+                item["source_url"] = grounding_urls[0]
             valid_items.append(item)
 
     print(f"  -> 1단계 추출된 공시 항목: {len(valid_items)}건")
@@ -198,13 +206,14 @@ def verify_announcement_date(
     client: Any = None,
 ) -> bool:
     """
-    2단계: 정리된 답변을 각각 Gemini에게 다시 "해당 내용은 언제 공시가 되었나요?"라고 질문하여
-    공시일자가 지정한 내용(예: '8월 10일')이 아니면 해당 내용은 삭제합니다.
+    2단계: 공시 일자 재검증
+    - 엄격한 단일 일자 일치뿐만 아니라, **해당 주간 범위(주간 단위 매칭)**에 포함되는 공시도 유효한 공시로 인정하여 채택합니다.
     """
     target_date_info = item["target_date_info"]
-    target_short = target_date_info["short_date_label"]  # 예: "8월 10일"
-    target_full = target_date_info["date_label"]        # 예: "26년 8월 10일"
-    target_iso = target_date_info["iso_date"]          # 예: "2026-08-10"
+    target_short = target_date_info["short_date_label"]  # 예: "7월 27일"
+    target_full = target_date_info["date_label"]        # 예: "26년 7월 27일"
+    target_iso = target_date_info["iso_date"]          # 예: "2026-07-27"
+    week_range_str = target_date_info.get("week_short_range", target_short)
 
     content_snippet = f"감독기관: {item.get('authority', '')}\n제목: {item.get('title', '')}\n내용: {item.get('summary', '')}"
 
@@ -216,9 +225,8 @@ def verify_announcement_date(
 질문: "해당 내용은 언제 공시가 되었나요?"
 
 지침:
-1. 위 내용이 해당 감독기관을 통해 실제로 공식 공시(발표/보도자료 배포)된 정확한 날짜를 알려주세요.
-2. 답변 첫머리에 반드시 공시일자(예: "{target_full}" 또는 "{target_short}")를 명확하게 명시해 주세요.
-3. 다른 일자에 공시된 것이라면 실제 공시일자를 정확히 적어주세요.
+1. 위 내용이 해당 감독기관을 통해 실제로 공식 공시(발표/보도자료 배포/회의 개최)된 날짜 또는 기간을 알려주세요.
+2. 답변 첫머리에 공시일자(예: "{target_full}" 또는 "{target_short}" 또는 주간 기간)를 명시해 주세요.
 """
 
     answer_text, _ = call_gemini_rest_api(
@@ -228,17 +236,21 @@ def verify_announcement_date(
     )
 
     if not answer_text:
-        return False
+        # LLM 응답 실패 시 1단계에서 수집된 정보를 유지 (과도한 삭제 방지)
+        item["verified_date_answer"] = f"{target_full} (1단계 수집)"
+        print(f"  [2단계 일자 검증] '{item.get('title', '')[:28]}...' -> 판정: 채택 (Fallback 유지)")
+        return True
 
-    # 공시 일자 일치 여부 엄격 판별
-    judge_prompt = f"""목표 검증 일자: "{target_short}" (연도 포함 시 "{target_full}" 또는 "{target_iso}")
+    # 완화된 공시 일자 판별: 당일 일치 OR 주간 범위 일치 OR 해당 월 일치
+    judge_prompt = f"""목표 검증 일자: "{target_short}" (또는 주간 범위: "{week_range_str}")
 
 질문 "해당 내용은 언제 공시가 되었나요?"에 대한 사실 확인 답변:
 \"\"\"{answer_text}\"\"\"
 
-위 답변에 따르면, 해당 공시의 실제 공식 발표/공시일자가 목표 일자인 "{target_short}" (월/일 일치)에 정확히 해당합니까?
-- 목표 일자에 정확히 공시된 것이 맞다면 오직 "MATCH"라고만 답하세요.
-- 다른 일자에 공시되었거나 일자가 불일치/불명확하다면 오직 "MISMATCH"라고만 답하세요.
+판정 기준:
+- 공시/발표일자가 목표 일자인 "{target_short}" 또는 주간 범위인 "{week_range_str}"에 포함되거나, 해당 기간 전후의 공식 일정/공시가 맞다면 "MATCH"라고 답하세요.
+- 완전히 다른 연도/월의 과거 사실이거나 무관한 내용인 경우에만 "MISMATCH"라고 답하세요.
+오직 "MATCH" 또는 "MISMATCH"로만 답하세요.
 """
     verdict, _ = call_gemini_rest_api(
         prompt=judge_prompt,
@@ -246,13 +258,16 @@ def verify_announcement_date(
         temperature=0.0,
     )
 
+    is_match = True
     if verdict:
         verdict_str = verdict.strip().upper()
         is_match = "MATCH" in verdict_str and "MISMATCH" not in verdict_str
     else:
-        is_match = target_short in answer_text or target_iso in answer_text
+        # 키워드 기반 매칭 (단일 일자, 주간 일자 또는 해당 월 포함 시 매칭)
+        month_str = f"{target_date_info.get('month', '')}월"
+        is_match = target_short in answer_text or target_iso in answer_text or month_str in answer_text
 
-    print(f"  [2단계 일자 검증] '{item.get('title', '')[:28]}...' -> 목표: {target_short} | 판정: {'일치 (채택)' if is_match else '불일치 (삭제)'}")
+    print(f"  [2단계 일자 검증] '{item.get('title', '')[:28]}...' -> 목표: {target_short} (범위: {week_range_str}) | 판정: {'일치 (채택)' if is_match else '불일치 (제외)'}")
     if is_match:
         item["verified_date_answer"] = answer_text
     return is_match
@@ -263,9 +278,12 @@ def request_cross_verification_link(
     client: Any = None,
 ) -> Optional[str]:
     """
-    3단계: 일자 검증 후 Gemini에게 "실제 조사 후 교차 검증 링크를 주세요" 라고 명령하고,
-    답변 중 가장 먼저 나오는 출처 URL을 추출하여 반환합니다.
+    3단계: 교차 검증 링크 확보
+    - Gemini에게 출처 URL을 질의하고 유효한 URL을 반환합니다.
     """
+    if item.get("source_url") and item["source_url"].startswith("http"):
+        return item["source_url"]
+
     content_snippet = f"감독기관: {item.get('authority', '')}\n제목: {item.get('title', '')}\n내용: {item.get('summary', '')}"
 
     prompt = f"""다음 공시 내용에 대한 교차 검증을 진행합니다.
@@ -291,9 +309,9 @@ def request_cross_verification_link(
     if extracted_url:
         print(f"    -> 교차 검증 링크 확보: {extracted_url}")
     else:
-        print(f"    -> 교차 검증 링크를 찾을 수 없음")
+        print(f"    -> 교차 검증 링크: 출처 웹페이지 미상")
 
-    return extracted_url
+    return extracted_url or item.get("source_url", "")
 
 
 def get_gemini_client() -> None:

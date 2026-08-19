@@ -33,7 +33,7 @@ def run_aml_pipeline(
 ) -> None:
     """
     자금세탁방지(AML) 감독기관 공시 수집, 일자 재검증, 교차검증 링크 확보,
-    스크린샷 캡처, 전문가 보고서 생성 및 이메일 발송 파이프라인을 실행합니다.
+    스크린샷 캡처, 반응형 HTML 전문가 보고서 생성 및 이메일 발송 파이프라인을 실행합니다.
     """
     if base_date is None:
         base_date = datetime.now()
@@ -65,6 +65,10 @@ def run_aml_pipeline(
         
         # 2단계 검증 질의: "해당 내용은 언제 공시가 되었나요?"
         for item in raw_items:
+            # 중복 체크 (동일 기관, 동일 제목)
+            if any(v.get("title") == item.get("title") for v in verified_items):
+                continue
+
             print(f"\n[2단계 공시일자 검증] 기관: {item.get('authority')} | 제목: {item.get('title')}")
             is_valid = verify_announcement_date(item, client)
             if is_valid:
@@ -73,7 +77,7 @@ def run_aml_pipeline(
                 item["source_url"] = verified_url or item.get("source_url", "")
                 verified_items.append(item)
             else:
-                print(f"  -> 지정된 공시일자({target_d['short_date_label']})와 불일치하여 해당 내용은 삭제(제외)합니다.")
+                print(f"  -> 지정된 공시일자({target_d['short_date_label']}) 범위와 불일치하여 해당 내용은 제외합니다.")
 
     print("\n" + "-" * 60)
     print(f"검증 완료된 최종 유효 공시 건수: 총 {len(verified_items)}건")
@@ -83,29 +87,35 @@ def run_aml_pipeline(
     if not skip_screenshot and verified_items:
         verified_items = capture_screenshots_for_items(verified_items)
 
-    # 5. 전문가 시각의 보고서 생성 (이모티콘 없이, '시사점' 표기)
+    # 5. 전문가 시각의 텍스트 및 HTML 보고서 생성
     print("\n" + "-" * 60)
-    print("4단계: AML 전문가 시각 보고서 작성")
+    print("4단계: AML 전문가 시각 보고서(텍스트 및 반응형 HTML) 작성")
     print("-" * 60)
-    subject, report_body = generate_expert_report(
+    subject, report_body, report_html = generate_expert_report(
         verified_items,
         week_title,
         date_range,
         client,
     )
 
-    # 로컬 보고서 파일 저장
+    # 로컬 보고서 파일 저장 (TXT 및 HTML)
     report_dir = Path(__file__).resolve().parent / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
-    report_filename = f"aml_report_{base_date.strftime('%Y%m%d_%H%M%S')}.txt"
-    report_path = report_dir / report_filename
-    with open(report_path, "w", encoding="utf-8") as f:
+    timestamp_str = base_date.strftime("%Y%m%d_%H%M%S")
+    
+    txt_path = report_dir / f"aml_report_{timestamp_str}.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
         f.write(f"제목: {subject}\n\n{report_body}")
-    print(f"로컬 보고서 저장 완료 -> {report_path}")
+    
+    html_path = report_dir / f"aml_report_{timestamp_str}.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(report_html)
+        
+    print(f"로컬 보고서 저장 완료 ->\n  - TXT: {txt_path}\n  - HTML: {html_path}")
 
     # 보고서 미리보기 출력
     print("\n[보고서 미리보기]\n" + "=" * 60)
-    print(report_body)
+    print(report_body[:800] + ("..." if len(report_body) > 800 else ""))
     print("=" * 60)
 
     # 6. 이메일 발송
@@ -121,11 +131,12 @@ def run_aml_pipeline(
         print(f"첨부 예정 파일 수: {len(attachment_paths)}개")
     else:
         print("\n" + "-" * 60)
-        print("5단계: 보고서 및 스크린샷 이메일 발송")
+        print("5단계: 보고서(반응형 HTML + 텍스트) 및 스크린샷 이메일 발송")
         print("-" * 60)
         success = send_aml_report_email(
             subject=subject,
             body_text=report_body,
+            body_html=report_html,
             attachment_paths=attachment_paths,
             recipients=RECIPIENTS,
         )
