@@ -1,6 +1,7 @@
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from config import SMTP_EMAIL, SMTP_PASSWORD, SMTP_SERVER, SMTP_PORT, RECIPIENTS
 
 def send_detailed_week2_insight_email():
@@ -150,7 +151,7 @@ def send_detailed_week2_insight_email():
         
         .insight-card {{ background: #eff6ff; border-left: 5px solid #2563eb; padding: 18px 20px; border-radius: 0 10px 10px 0; margin-top: 22px; }}
         .insight-header {{ font-size: 14px; font-weight: 800; color: #1e40af; margin-bottom: 8px; display: flex; align-items: center; }}
-        .insight-body {{ font-size: 13.5px; color: #1e3a8a; line-height: 1.6; margin: 0; }}
+        .insight-body {{ font-size: 13.5px; color: #1e3a8a; line-height: 1.6; margin: 0; padding-left: 18px; }}
         .insight-body li {{ margin-bottom: 6px; }}
         .insight-body li:last-child {{ margin-bottom: 0; }}
         
@@ -170,7 +171,7 @@ def send_detailed_week2_insight_email():
           <div class="toc-title">📋 8월 2주차 주요 공시 및 핵심 의제</div>
           <ol class="toc-list">
             <li><strong>[AML]</strong> 가상자산 시장 투명성 강화를 위한 「특금법 시행령」 개정안 국무회의 의결 (‘26.8.11)</li>
-            <li><strong>[AML]</strong> KoFIU, 신종피싱 의심계좌 거래정지제도 점검회의 개최 및 성과 분석 (‘26.8.10)</li>
+            <li><strong>[AML]</strong> KoFIU, 신종피싱 의심계좌 거래정지제도* 점검회의 개최 및 성과 분석 (‘26.8.10)</li>
             <li><strong>[AML]</strong> FinCEN, 기업 투명성법(CTA)에 따른 실소유자 정보(BOI) 신고 의무 폐지 최종 확정 (‘26.8.11)</li>
             <li><strong>[Sanctions/AML]</strong> 글로벌 감독기구(FATF/OFAC/EBA), 초국경 금융사기 및 자금세탁 차단 공동 가이드라인 발표 (‘26.8.13)</li>
           </ol>
@@ -302,25 +303,47 @@ def send_detailed_week2_insight_email():
     </html>
     """
 
-    msg = MIMEMultipart("alternative")
+    # 로컬 보고서 파일 저장 (TXT 및 HTML)
+    report_dir = Path(__file__).resolve().parent / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    
+    txt_path = report_dir / "aml_report_20260810_week2.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"제목: {subject}\n\n{body_text}")
+        
+    html_path = report_dir / "aml_report_20260810_week2.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(body_html)
+        
+    print(f"로컬 보고서 저장 완료 ->\n  - TXT: {txt_path}\n  - HTML: {html_path}")
+
+    # 이메일 메시지 구성 및 전송
+    msg = MIMEMultipart("mixed")
     msg["From"] = f"자금세탁방지본부 CoP <{SMTP_EMAIL}>"
     msg["To"] = ", ".join(RECIPIENTS)
     msg["Subject"] = subject
 
+    msg_body = MIMEMultipart("alternative")
     part1 = MIMEText(body_text, "plain", "utf-8")
     part2 = MIMEText(body_html, "html", "utf-8")
-    msg.attach(part1)
-    msg.attach(part2)
+    msg_body.attach(part1)
+    msg_body.attach(part2)
+    msg.attach(msg_body)
 
     print(f"[SMTP 전송 시작] 대상: {', '.join(RECIPIENTS)}")
-    server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-    server.ehlo()
-    server.starttls()
-    server.ehlo()
-    server.login(SMTP_EMAIL, SMTP_PASSWORD)
-    server.sendmail(SMTP_EMAIL, RECIPIENTS, msg.as_string())
-    server.quit()
-    print("[상세 이메일 발송 완료] 성공적으로 발송되었습니다.")
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, RECIPIENTS, msg.as_string())
+        server.quit()
+        print("[상세 이메일 발송 성공] 2026년 8월 2주차 보고서가 성공적으로 발송되었습니다.")
+        return True
+    except Exception as e:
+        print(f"[이메일 발송 오류] {e}")
+        return False
 
 if __name__ == "__main__":
     send_detailed_week2_insight_email()
